@@ -124,6 +124,13 @@ if __name__ == "__main__":
         db.create_all()
         if not User.query.first():
             db.session.add(User(username="admin", password=sha("admin")))
-            db.session.add(License(key=new_key(), expires=datetime.utcnow()+timedelta(days=30)))
+            db.session.add(
+                License(
+                    key=new_key(),
+                    expires=datetime.utcnow() + timedelta(days=30)
+                )
+            )
             db.session.commit()
-    app.run(debug=True)
+
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)

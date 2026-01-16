@@ -150,6 +150,33 @@ if not fn then
 end
 
 return fn()
+@app.route("/obfuscate", methods=["POST"])
+def obfuscate():
+    # Reject browser user-agents
+    ua = request.headers.get("User-Agent", "").lower()
+    forbidden = ["mozilla", "chrome", "safari", "firefox", "edge", "opera"]
+
+    if any(x in ua for x in forbidden):
+        return jsonify({"error": "Browser access denied"}), 403
+
+    raw = request.data
+    if not raw:
+        return jsonify({"error": "Empty script"}), 400
+
+    script = raw.decode("utf-8", errors="ignore")
+
+    # Simple obfuscation (placeholder)
+    # You can replace this with a real obfuscator later
+    obfuscated = "".join(f"\\{ord(c)}" for c in script)
+
+    script_id = str(uuid.uuid4())
+    script_path = os.path.join(SCRIPT_DIR, f"{script_id}.lua")
+
+    with open(script_path, "w", encoding="utf-8") as f:
+        f.write(f"loadstring('{obfuscated}')()")
+
+    loader = generate_loader(script_id)
+    return loader, 200, {"Content-Type": "text/plain"}
 """
 
 if __name__ == "__main__":

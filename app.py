@@ -1,183 +1,139 @@
-import os
-import uuid
-from flask import Flask, request, send_file, jsonify, abort, make_response
+from flask import Flask, request, jsonify, abort
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime, timedelta
+import secrets, hashlib, os
+
+# =========================
+# SHINRA CONFIG
+# =========================
+
+SYSTEM_NAME = "SHINRA"
+EXECUTOR_HEADER = "X-ELLIS-CLIENT"
+EXECUTOR_TOKEN  = "adolla-core"
+BLOCKED_UA = ["Mozilla", "Chrome", "Safari", "Firefox", "Edge", "Opera"]
 
 app = Flask(__name__)
+app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///database.db"
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+db = SQLAlchemy(app)
 
-# Directory to store protected scripts
-SCRIPT_DIR = "scripts"
-os.makedirs(SCRIPT_DIR, exist_ok=True)
+# =========================
+# DATABASE
+# =========================
 
-# Maximum script size (1 MB)
-MAX_SCRIPT_SIZE = 1_000_000
+class License(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(64), unique=True)
+    expires = db.Column(db.DateTime)
+    active = db.Column(db.Boolean, default=True)
 
-# Security headers
-@app.after_request
-def apply_security_headers(response):
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Cache-Control"] = "no-store"
-    return response
+# =========================
+# UTILS
+# =========================
 
-# Global error handler
-@app.errorhandler(Exception)
-def handle_exception(e):
-    return jsonify({"error": "Internal server error"}), 500
+def sha(x):
+    return hashlib.sha256(x.encode()).hexdigest()
 
-@app.route("/", methods=["GET"])
-def home():
-    return {
-        "status": "Ultra Lua Protector API",
-        "message": "Executor-only environment validation active."
-    }
+def new_key():
+    return secrets.token_hex(32)
 
-@app.route("/protect", methods=["POST"])
-def protect():
-    # Reject missing content-type
-    if not request.content_type:
-        return jsonify({"error": "Missing Content-Type"}), 400
+def is_browser():
+    ua = request.headers.get("User-Agent", "")
+    return any(b in ua for b in BLOCKED_UA)
 
-    # Reject non-text payloads
-    if "text" not in request.content_type:
-        return jsonify({"error": "Invalid Content-Type"}), 400
+def executor_ok():
+    return request.headers.get(EXECUTOR_HEADER) == EXECUTOR_TOKEN
 
-    # Reject empty body
-    raw = request.data
-    if not raw:
-        return jsonify({"error": "Empty request body"}), 400
+def license_ok(k):
+    lic = License.query.filter_by(key=k, active=True).first()
+    if not lic:
+        return False
+    if lic.expires < datetime.utcnow():
+        lic.active = False
+        db.session.commit()
+        return False
+    return True
 
-    # Reject oversized scripts
-    if len(raw) > MAX_SCRIPT_SIZE:
-        return jsonify({"error": "Script too large"}), 413
+# =========================
+# GLOBAL GATE (ELLIS STYLE)
+# =========================
 
-    # Decode safely
-    try:
-        script = raw.decode("utf-8", errors="ignore")
-    except:
-        return jsonify({"error": "Invalid UTF-8 encoding"}), 400
+@app.before_request
+def gate():
+    if is_browser() and not executor_ok():
+        abort(403)
 
-    if script.strip() == "":
-        return jsonify({"error": "Script is empty"}), 400
+# =========================
+# HANDSHAKE (ELLIS)
+# =========================
 
-    # Generate script ID
-    script_id = str(uuid.uuid4())
-    script_path = os.path.join(SCRIPT_DIR, f"{script_id}.lua")
+@app.route("/api/handshake", methods=["POST"])
+def handshake():
+    if not executor_ok():
+        return jsonify({"status": "blocked"}), 403
 
-    # Write script safely
-    with open(script_path, "w", encoding="utf-8") as f:
-        f.write(script)
+    return jsonify({
+        "system": SYSTEM_NAME,
+        "state": "ADOLLA_LINKED",
+        "challenge": sha("shinra")
+    })
 
-    loader = generate_loader(script_id)
-    response = make_response(loader)
-    response.headers["Content-Type"] = "text/plain"
-    return response
+# =========================
+# AUTH
+# =========================
 
-@app.route("/payload/<script_id>", methods=["GET"])
-def payload(script_id):
-    # Reject invalid UUIDs
-    try:
-        uuid.UUID(script_id)
-    except:
-        return "-- invalid payload id", 404
+@app.route("/api/auth", methods=["POST"])
+def auth():
+    if not executor_ok():
+        return jsonify({"status": "executor_required"}), 403
 
-    script_path = os.path.join(SCRIPT_DIR, f"{script_id}.lua")
+    data = request.json
+    key = data.get("key")
 
-    if not os.path.exists(script_path):
-        return "-- invalid payload id", 404
+    if not license_ok(key):
+        return jsonify({"status": "invalid_key"}), 403
 
-    return send_file(script_path, mimetype="text/plain")
+    return jsonify({
+        "status": "ok",
+        "load": "/api/load/core.lua"
+    })
 
-def generate_loader(script_id):
-    return f"""
--- Ultra Lua Protector Loader (Shinraa Edition)
--- Extreme environment validation
+# =========================
+# SCRIPT DELIVERY
+# =========================
 
-local function is_executor()
-    -- Basic executor fingerprints
-    if getgenv or syn or identifyexecutor or is_synapse_function then
-        return true
-    end
+@app.route("/api/load/<script>")
+def load(script):
+    key = request.args.get("key")
 
-    -- Deep exploit API checks
-    if hookfunction or getrawmetatable or setreadonly or getrenv then
-        return true
-    end
+    if not executor_ok() or not license_ok(key):
+        return "SHINRA BLOCKED", 403
 
-    -- Roblox environment check
-    if game and typeof(game) == "Instance" then
-        return true
-    end
+    path = f"scripts/{script}"
+    if not os.path.exists(path):
+        return "404", 404
 
-    return false
-end
+    return open(path, encoding="utf-8").read()
 
-if not is_executor() then
-    -- Aggressive failure
-    while true do
-        error("Ultra Lua Protector: Invalid execution environment")
-    end
-end
+# =========================
+# TEMP KEY GEN
+# =========================
 
-local http_request = (syn and syn.request)
-    or (http and http.request)
-    or request
-    or http_request
+@app.route("/api/gen")
+def gen():
+    k = new_key()
+    db.session.add(License(
+        key=k,
+        expires=datetime.utcnow() + timedelta(days=30)
+    ))
+    db.session.commit()
+    return jsonify({"key": k})
 
-if not http_request then
-    error("Ultra Lua Protector: No HTTP request function available")
-end
-
-local url = "https://YOUR-KOYEB-APP-URL/payload/{script_id}"
-
-local response = http_request({{
-    Url = url,
-    Method = "GET"
-}})
-
-if not response then
-    error("Ultra Lua Protector: No response from server")
-end
-
-local body = response.Body or response.body
-if not body or body == "" then
-    error("Ultra Lua Protector: Empty payload")
-end
-
-local fn, err = loadstring(body)
-if not fn then
-    error("Ultra Lua Protector: Failed to load payload: " .. tostring(err))
-end
-
-return fn()
-@app.route("/obfuscate", methods=["POST"])
-def obfuscate():
-    # Reject browser user-agents
-    ua = request.headers.get("User-Agent", "").lower()
-    forbidden = ["mozilla", "chrome", "safari", "firefox", "edge", "opera"]
-
-    if any(x in ua for x in forbidden):
-        return jsonify({"error": "Browser access denied"}), 403
-
-    raw = request.data
-    if not raw:
-        return jsonify({"error": "Empty script"}), 400
-
-    script = raw.decode("utf-8", errors="ignore")
-
-    # Simple obfuscation (placeholder)
-    # You can replace this with a real obfuscator later
-    obfuscated = "".join(f"\\{ord(c)}" for c in script)
-
-    script_id = str(uuid.uuid4())
-    script_path = os.path.join(SCRIPT_DIR, f"{script_id}.lua")
-
-    with open(script_path, "w", encoding="utf-8") as f:
-        f.write(f"loadstring('{obfuscated}')()")
-
-    loader = generate_loader(script_id)
-    return loader, 200, {"Content-Type": "text/plain"}
-"""
+# =========================
+# INIT
+# =========================
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True)

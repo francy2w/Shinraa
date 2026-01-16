@@ -1,0 +1,9 @@
+body.dark {
+  background:#0b0b0b;
+  color:#ff2a2a;
+  font-family:monospace;
+}
+button {
+  background:#ff2a2a;
+  color:black;
+}

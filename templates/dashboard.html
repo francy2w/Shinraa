@@ -1,0 +1,6 @@
+<h1>{{app}} DASHBOARD</h1>
+<ul>
+{% for l in licenses %}
+<li>{{l.key}} | {{l.expires}} | {{l.active}}</li>
+{% endfor %}
+</ul>
